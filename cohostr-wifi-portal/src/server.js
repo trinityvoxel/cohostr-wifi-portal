@@ -191,8 +191,8 @@ async function storeInD1(name, email, mac) {
 // ─── Portal HTML ──────────────────────────────────────────────────────────────
 
 function renderPortal(query) {
-  const mac = query.mac || '';
-  const redirect = query.redirect || property.listingUrl;
+  const mac = query.id || query.mac || ''; // Unifi passes client MAC as 'id'
+  const redirect = query.url || query.redirect || property.listingUrl;
   const ap = query.ap || '';
   const ssid = query.ssid || '';
 
