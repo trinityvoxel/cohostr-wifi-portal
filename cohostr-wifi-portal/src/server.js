@@ -132,8 +132,14 @@ async function authorizeGuest(mac, minutes = 480) {
       csrfToken
     );
 
+    console.log(`Unifi auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
+
     if (authRes.status !== 200) {
       throw new Error(`Guest authorization failed — HTTP ${authRes.status}`);
+    }
+
+    if (authRes.body?.meta?.rc !== 'ok') {
+      throw new Error(`Unifi rejected authorization: ${JSON.stringify(authRes.body?.meta)}`);
     }
 
     console.log(`Authorized guest: ${mac} for ${minutes} min`);
