@@ -4,7 +4,14 @@ const url = require('url');
 const fs = require('fs');
 const path = require('path');
 
-const PROPERTY_ID = process.env.PROPERTY || 'riverbend';
+function resolveProperty(input) {
+  const s = (input || '').toLowerCase().trim();
+  if (s.includes('river') || s === '1') return 'riverbend';
+  if (s.includes('comal') || s === '2') return 'comal';
+  if (s.includes('heron') || s.includes('blue') || s === '3') return 'heron';
+  return s; // fallback — use as-is
+}
+const PROPERTY_ID = resolveProperty(process.env.PROPERTY || 'riverbend');
 const IMAGE_CACHE_PATH = '/tmp/portal-cover.jpg';
 const PORT = parseInt(process.env.PORT || '8099');
 const UNIFI_HOST = process.env.UNIFI_HOST;
