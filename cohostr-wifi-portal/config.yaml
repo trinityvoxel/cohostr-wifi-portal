@@ -1,5 +1,5 @@
 name: CohoSTR WiFi Portal
-version: "1.0.0"
+version: "1.0.1"
 slug: cohostr_wifi_portal
 description: Branded guest WiFi captive portal for CohoSTR properties
 url: https://github.com/trinityvoxel/cohostr-wifi-portal
@@ -10,7 +10,7 @@ arch:
 init: false
 options:
   property: "riverbend"
-  port: 8099
+  port: 80
   unifi_host: "192.168.1.1"
   unifi_user: "admin"
   unifi_pass: ""
@@ -29,6 +29,6 @@ schema:
   cloudflare_d1_database_id: "str"
   cloudflare_api_token: "str"
 ports:
-  8099/tcp: 8099
+  80/tcp: 80
 ports_description:
-  8099/tcp: WiFi Portal
+  80/tcp: WiFi Portal
