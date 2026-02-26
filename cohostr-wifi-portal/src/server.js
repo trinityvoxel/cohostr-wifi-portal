@@ -205,27 +205,27 @@ function renderPortal(query) {
     }
     .card {
       background: white;
-      border-radius: 12px;
+      border-radius: 16px;
       box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-      padding: 40px;
-      max-width: 440px;
+      padding: 60px;
+      max-width: 680px;
       width: 100%;
     }
-    h1 { font-size: 24px; color: #1a1a1a; margin-bottom: 4px; }
-    .loc { color: #888; font-size: 14px; margin-bottom: 28px; }
-    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }
+    h1 { font-size: 32px; color: #1a1a1a; margin-bottom: 6px; }
+    .loc { color: #888; font-size: 16px; margin-bottom: 36px; }
+    label { display: block; font-size: 15px; font-weight: 600; color: #444; margin-bottom: 8px; }
     input {
-      width: 100%; padding: 11px 14px;
-      border: 1.5px solid #ddd; border-radius: 7px;
-      font-size: 15px; margin-bottom: 16px;
+      width: 100%; padding: 14px 16px;
+      border: 1.5px solid #ddd; border-radius: 8px;
+      font-size: 17px; margin-bottom: 20px;
       transition: border-color 0.2s;
     }
     input:focus { outline: none; border-color: #0070f3; }
     button {
-      width: 100%; padding: 13px;
+      width: 100%; padding: 16px;
       background: #0070f3; color: white;
-      border: none; border-radius: 7px;
-      font-size: 16px; font-weight: 600;
+      border: none; border-radius: 8px;
+      font-size: 18px; font-weight: 600;
       cursor: pointer; transition: background 0.2s;
     }
     button:hover { background: #005fd1; }
