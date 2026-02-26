@@ -332,6 +332,8 @@ const server = http.createServer(async (req, res) => {
 
   // Serve portal page
   if (req.method === 'GET' && (path === '/' || path === '/guest' || path.startsWith('/guest/'))) {
+    console.log(`Portal request — full URL: ${req.url}`);
+    console.log(`Query params: ${JSON.stringify(query)}`);
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(renderPortal(query));
     return;
