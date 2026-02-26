@@ -1,5 +1,5 @@
 name: CohoSTR WiFi Portal
-version: "1.2.2"
+version: "1.3.0"
 slug: cohostr_wifi_portal
 description: "Branded guest WiFi captive portal for CohoSTR properties. Set 'property' to: riverbend, comal, or heron"
 url: https://github.com/trinityvoxel/cohostr-wifi-portal
@@ -9,7 +9,11 @@ arch:
   - amd64
 init: false
 options:
-  property: "riverbend"
+  property_id: "riverbend"
+  property_name: "Riverbend Hideaway"
+  property_location: "San Marcos, TX"
+  property_listing_url: "https://www.cohostr.com/listings/297530"
+  property_image_url: "https://hostaway-platform.s3.us-west-2.amazonaws.com/listing/87999-297530-DcPs67WuOwB5o7P5GqtCvFN32E8cRhwrrp8RMIlPoa8-68efd79c87e31"
   port: 80
   unifi_host: "192.168.1.1"
   unifi_user: "admin"
@@ -22,7 +26,11 @@ options:
   google_client_email: ""
   google_private_key: ""
 schema:
-  property: "str"
+  property_id: "str"
+  property_name: "str"
+  property_location: "str"
+  property_listing_url: "str"
+  property_image_url: "str"
   port: "int"
   unifi_host: "str"
   unifi_user: "str"

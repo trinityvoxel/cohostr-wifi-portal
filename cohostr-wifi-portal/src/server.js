@@ -5,16 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-function resolveProperty(input) {
-  const s = (input || '').toLowerCase().trim();
-  if (s.includes('river') || s === '1') return 'riverbend';
-  if (s.includes('comal') || s === '2') return 'comal';
-  if (s.includes('heron') || s.includes('blue') || s === '3') return 'heron';
-  return s; // fallback — use as-is
-}
-const PROPERTY_ID = resolveProperty(process.env.PROPERTY || 'riverbend');
+// All property details driven by add-on config — no hardcoded properties
+const PROPERTY_ID = process.env.PROPERTY_ID || 'property';
+const property = {
+  id: PROPERTY_ID,
+  name: process.env.PROPERTY_NAME || 'Guest WiFi Portal',
+  location: process.env.PROPERTY_LOCATION || '',
+  listingUrl: process.env.PROPERTY_LISTING_URL || '',
+  image: process.env.PROPERTY_IMAGE_URL || '',
+};
+
 const IMAGE_CACHE_PATH = '/tmp/portal-cover.jpg';
-const PORT = parseInt(process.env.PORT || '8099');
+const PORT = parseInt(process.env.PORT || '80');
 const UNIFI_HOST = process.env.UNIFI_HOST;
 const UNIFI_USER = process.env.UNIFI_USER;
 const UNIFI_PASS = process.env.UNIFI_PASS;
@@ -26,33 +28,6 @@ const CF_API_TOKEN = process.env.CF_API_TOKEN;
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-
-const PROPERTIES = {
-  riverbend: {
-    name: 'Riverbend Hideaway',
-    location: 'San Marcos, TX',
-    listingUrl: 'https://www.cohostr.com/listings/297530',
-    image: 'https://hostaway-platform.s3.us-west-2.amazonaws.com/listing/87999-297530-DcPs67WuOwB5o7P5GqtCvFN32E8cRhwrrp8RMIlPoa8-68efd79c87e31',
-  },
-  comal: {
-    name: 'Comal Condo',
-    location: 'New Braunfels, TX',
-    listingUrl: 'https://www.cohostr.com/listings/241046',
-    image: 'https://hostaway-platform.s3.us-west-2.amazonaws.com/listing/87999-241046-nr9U-nZVh83g37snneUlW5bKYE7V0ZP04BoVUjoR-dA-65ca4f6e12ff7',
-  },
-  heron: {
-    name: "Blue Heron's Nest",
-    location: 'New Braunfels, TX',
-    listingUrl: 'https://www.cohostr.com/listings/385190',
-    image: 'https://hostaway-platform.s3.us-west-2.amazonaws.com/listing/87999-385190-hgo2AzCyWTfjOfdfaD6w3FQDjsyegKXKzUdTkHhcTck-680d42b65d55e',
-  },
-};
-
-const property = PROPERTIES[PROPERTY_ID];
-if (!property) {
-  console.error(`Unknown property: ${PROPERTY_ID}`);
-  process.exit(1);
-}
 
 console.log(`CohoSTR WiFi Portal starting — ${property.name} on port ${PORT}`);
 
