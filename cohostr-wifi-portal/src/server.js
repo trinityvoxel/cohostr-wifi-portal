@@ -65,7 +65,7 @@ function downloadImage(imageUrl, dest) {
 
 // ─── Unifi Guest Authorization ────────────────────────────────────────────────
 
-async function unifiRequest(path, method, body, cookies) {
+async function unifiRequest(path, method, body, cookies, csrfToken) {
   return new Promise((resolve, reject) => {
     const postData = body ? JSON.stringify(body) : '';
     const options = {
@@ -78,6 +78,7 @@ async function unifiRequest(path, method, body, cookies) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData),
         ...(cookies ? { Cookie: cookies } : {}),
+        ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
       },
     };
 
@@ -101,22 +102,32 @@ async function unifiRequest(path, method, body, cookies) {
 
 async function authorizeGuest(mac, minutes = 480) {
   try {
-    // Login to Unifi controller
-    const loginRes = await unifiRequest('/api/login', 'POST', {
+    // UniFi OS login (Cloud Gateway Ultra, UDM, UDM Pro)
+    const loginRes = await unifiRequest('/api/auth/login', 'POST', {
       username: UNIFI_USER,
       password: UNIFI_PASS,
     });
 
-    const cookies = loginRes.headers['set-cookie']?.map(c => c.split(';')[0]).join('; ');
-    if (!cookies) throw new Error('Unifi login failed — no cookies returned');
+    if (loginRes.status !== 200) {
+      throw new Error(`Unifi login failed — HTTP ${loginRes.status}`);
+    }
 
-    // Authorize the guest
-    await unifiRequest(
-      `/api/s/${UNIFI_SITE}/cmd/stamgr`,
+    const setCookies = loginRes.headers['set-cookie'] || [];
+    const cookies = setCookies.map(c => c.split(';')[0]).join('; ');
+    const csrfToken = loginRes.headers['x-csrf-token'] || '';
+
+    // Authorize the guest via UniFi OS proxy path
+    const authRes = await unifiRequest(
+      `/proxy/network/api/s/${UNIFI_SITE}/cmd/stamgr`,
       'POST',
       { cmd: 'authorize-guest', mac, minutes },
-      cookies
+      cookies,
+      csrfToken
     );
+
+    if (authRes.status !== 200) {
+      throw new Error(`Guest authorization failed — HTTP ${authRes.status}`);
+    }
 
     console.log(`Authorized guest: ${mac} for ${minutes} min`);
     return true;
