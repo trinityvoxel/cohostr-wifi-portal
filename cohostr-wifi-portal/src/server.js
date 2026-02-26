@@ -1,8 +1,11 @@
 const http = require('http');
 const https = require('https');
 const url = require('url');
+const fs = require('fs');
+const path = require('path');
 
 const PROPERTY_ID = process.env.PROPERTY || 'riverbend';
+const IMAGE_CACHE_PATH = '/tmp/portal-cover.jpg';
 const PORT = parseInt(process.env.PORT || '8099');
 const UNIFI_HOST = process.env.UNIFI_HOST;
 const UNIFI_USER = process.env.UNIFI_USER;
@@ -40,6 +43,25 @@ if (!property) {
 }
 
 console.log(`CohoSTR WiFi Portal starting — ${property.name} on port ${PORT}`);
+
+// ─── Image Cache ──────────────────────────────────────────────────────────────
+
+function downloadImage(imageUrl, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    https.get(imageUrl, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        file.close();
+        return downloadImage(res.headers.location, dest).then(resolve).catch(reject);
+      }
+      res.pipe(file);
+      file.on('finish', () => { file.close(); resolve(); });
+    }).on('error', (err) => {
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
 
 // ─── Unifi Guest Authorization ────────────────────────────────────────────────
 
@@ -179,7 +201,7 @@ function renderPortal(query) {
       justify-content: center;
       padding: 20px;
       background: linear-gradient(rgba(0,0,0,0.35), rgba(0,0,0,0.35)),
-                  url('${property.image}') center/cover no-repeat;
+                  url('/cover.jpg') center/cover no-repeat;
     }
     .card {
       background: white;
@@ -283,6 +305,18 @@ const server = http.createServer(async (req, res) => {
   const path = parsed.pathname;
   const query = parsed.query;
 
+  // Serve cached cover image
+  if (req.method === 'GET' && path === '/cover.jpg') {
+    if (fs.existsSync(IMAGE_CACHE_PATH)) {
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' });
+      fs.createReadStream(IMAGE_CACHE_PATH).pipe(res);
+    } else {
+      res.writeHead(404);
+      res.end('Image not yet cached');
+    }
+    return;
+  }
+
   // Serve portal page
   if (req.method === 'GET' && (path === '/' || path === '/guest' || path.startsWith('/guest/'))) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -339,6 +373,13 @@ const server = http.createServer(async (req, res) => {
   res.end('Not found');
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Portal running at http://0.0.0.0:${PORT} — ${property.name}`);
-});
+// Download cover image at startup then start server
+console.log(`Downloading cover image for ${property.name}...`);
+downloadImage(property.image, IMAGE_CACHE_PATH)
+  .then(() => console.log('Cover image cached successfully'))
+  .catch(err => console.warn('Cover image download failed (will retry on next restart):', err.message))
+  .finally(() => {
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Portal running at http://0.0.0.0:${PORT} — ${property.name}`);
+    });
+  });
