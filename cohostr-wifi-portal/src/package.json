@@ -1,0 +1,10 @@
+{
+  "name": "cohostr-wifi-portal",
+  "version": "1.0.0",
+  "description": "CohoSTR guest WiFi captive portal for Home Assistant",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
