@@ -1,5 +1,5 @@
 name: CohoSTR WiFi Portal
-version: "1.1.4"
+version: "1.2.0"
 slug: cohostr_wifi_portal
 description: "Branded guest WiFi captive portal for CohoSTR properties. Set 'property' to: riverbend, comal, or heron"
 url: https://github.com/trinityvoxel/cohostr-wifi-portal
@@ -18,6 +18,9 @@ options:
   cloudflare_account_id: ""
   cloudflare_d1_database_id: "0c4bbc25-103c-42bb-99ba-59adbfc4709f"
   cloudflare_api_token: ""
+  google_sheet_id: "1-RZN_-xAb69eFrc5kAr0Qf-XTQdax5djy5YdJzRu82s"
+  google_client_email: ""
+  google_private_key: ""
 schema:
   property: "str"
   port: "int"
@@ -28,6 +31,9 @@ schema:
   cloudflare_account_id: "str"
   cloudflare_d1_database_id: "str"
   cloudflare_api_token: "str"
+  google_sheet_id: "str"
+  google_client_email: "str"
+  google_private_key: "str"
 ports:
   80/tcp: 80
 ports_description:

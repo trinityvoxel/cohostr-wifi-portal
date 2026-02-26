@@ -3,6 +3,7 @@ const https = require('https');
 const url = require('url');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 function resolveProperty(input) {
   const s = (input || '').toLowerCase().trim();
@@ -21,6 +22,10 @@ const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_D1_DATABASE_ID = process.env.CF_D1_DATABASE_ID;
 const CF_API_TOKEN = process.env.CF_API_TOKEN;
+
+const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
+const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 
 const PROPERTIES = {
   riverbend: {
@@ -68,6 +73,103 @@ function downloadImage(imageUrl, dest) {
       reject(err);
     });
   });
+}
+
+// ─── Google Sheets Sync ───────────────────────────────────────────────────────
+
+function createGoogleJWT() {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    iss: GOOGLE_CLIENT_EMAIL,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600,
+    iat: now,
+  })).toString('base64url');
+
+  const sign = crypto.createSign('RSA-SHA256');
+  sign.update(`${header}.${payload}`);
+  const signature = sign.sign(GOOGLE_PRIVATE_KEY, 'base64url');
+  return `${header}.${payload}.${signature}`;
+}
+
+async function getGoogleAccessToken() {
+  const jwt = createGoogleJWT();
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    assertion: jwt,
+  }).toString();
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'oauth2.googleapis.com',
+      port: 443,
+      path: '/token',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        const result = JSON.parse(data);
+        if (result.access_token) resolve(result.access_token);
+        else reject(new Error(`Token error: ${JSON.stringify(result)}`));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function syncToGoogleSheets(name, email, propertyName, timestamp) {
+  if (!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
+    console.warn('Google Sheets credentials not configured — skipping sync');
+    return;
+  }
+
+  try {
+    const token = await getGoogleAccessToken();
+    const values = [[name, email, propertyName, timestamp, new Date().toISOString()]];
+    const body = JSON.stringify({ values });
+    const path = `/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/Sheet1!A:E:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+
+    await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'sheets.googleapis.com',
+        port: 443,
+        path,
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      };
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            console.log(`Synced to Google Sheets: ${email}`);
+            resolve();
+          } else {
+            reject(new Error(`Sheets API error ${res.statusCode}: ${data}`));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  } catch (err) {
+    console.error('Google Sheets sync failed:', err.message);
+  }
 }
 
 // ─── Unifi Guest Authorization ────────────────────────────────────────────────
@@ -330,8 +432,10 @@ const server = http.createServer(async (req, res) => {
 
         console.log(`New guest: ${name} <${email}> mac=${mac}`);
 
-        // Store in D1 (non-blocking)
+        // Store in D1 + Google Sheets (non-blocking)
+        const timestamp = new Date().toISOString();
         storeInD1(name, email, mac).catch(console.error);
+        syncToGoogleSheets(name, email, property.name, timestamp).catch(console.error);
 
         // Authorize guest in Unifi
         if (mac) {
