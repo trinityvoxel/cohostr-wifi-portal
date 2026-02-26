@@ -127,7 +127,7 @@ async function getGoogleAccessToken() {
   });
 }
 
-async function syncToGoogleSheets(name, email, propertyName, timestamp) {
+async function syncToGoogleSheets(name, email, propertyName, timestamp, emailConsent = false) {
   if (!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
     console.warn('Google Sheets credentials not configured — skipping sync');
     return;
@@ -135,9 +135,9 @@ async function syncToGoogleSheets(name, email, propertyName, timestamp) {
 
   try {
     const token = await getGoogleAccessToken();
-    const values = [[name, email, propertyName, timestamp, new Date().toISOString()]];
+    const values = [[name, email, propertyName, timestamp, emailConsent ? 'Yes' : 'No', new Date().toISOString()]];
     const body = JSON.stringify({ values });
-    const path = `/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/Sheet1!A:E:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+    const path = `/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/Sheet1!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
 
     await new Promise((resolve, reject) => {
       const options = {
@@ -254,7 +254,7 @@ async function authorizeGuest(mac, minutes = 480) {
 
 // ─── Cloudflare D1 Storage ────────────────────────────────────────────────────
 
-async function storeInD1(name, email, mac) {
+async function storeInD1(name, email, mac, emailConsent = false) {
   if (!CF_ACCOUNT_ID || !CF_D1_DATABASE_ID || !CF_API_TOKEN) {
     console.warn('Cloudflare credentials not configured — skipping D1 sync');
     return;
@@ -262,8 +262,8 @@ async function storeInD1(name, email, mac) {
 
   try {
     const timestamp = new Date().toISOString();
-    const sql = `INSERT INTO guests (name, email, property_id, property_name, submitted_at) VALUES (?, ?, ?, ?, ?)`;
-    const params = [name, email, PROPERTY_ID, property.name, timestamp];
+    const sql = `INSERT INTO guests (name, email, property_id, property_name, submitted_at, email_consent) VALUES (?, ?, ?, ?, ?, ?)`;
+    const params = [name, email, PROPERTY_ID, property.name, timestamp, emailConsent ? 1 : 0];
 
     const body = JSON.stringify({ sql, params });
 
@@ -377,6 +377,11 @@ function renderPortal(query) {
       <label for="email">Email Address</label>
       <input id="email" name="email" type="email" placeholder="jane@example.com" required autocomplete="email">
 
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+        <input type="checkbox" id="email_consent" name="email_consent" value="yes" checked style="width:18px;height:18px;margin:0;cursor:pointer;">
+        <label for="email_consent" style="margin:0;font-weight:400;font-size:14px;color:#555;cursor:pointer;">Send me discounts on future stays</label>
+      </div>
+
       <button type="submit">Connect to WiFi</button>
     </form>
 </body>
@@ -423,6 +428,7 @@ const server = http.createServer(async (req, res) => {
         const email = params.get('email') || '';
         const mac = params.get('mac') || '';
         const redirect = params.get('redirect') || '';
+        const emailConsent = params.get('email_consent') === 'yes';
 
         if (!name || !email) {
           res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -434,8 +440,8 @@ const server = http.createServer(async (req, res) => {
 
         // Store in D1 + Google Sheets (non-blocking)
         const timestamp = new Date().toISOString();
-        storeInD1(name, email, mac).catch(console.error);
-        syncToGoogleSheets(name, email, property.name, timestamp).catch(console.error);
+        storeInD1(name, email, mac, emailConsent).catch(console.error);
+        syncToGoogleSheets(name, email, property.name, timestamp, emailConsent).catch(console.error);
 
         // Authorize guest in Unifi
         if (mac) {

@@ -1,5 +1,5 @@
 name: CohoSTR WiFi Portal
-version: "1.2.0"
+version: "1.2.1"
 slug: cohostr_wifi_portal
 description: "Branded guest WiFi captive portal for CohoSTR properties. Set 'property' to: riverbend, comal, or heron"
 url: https://github.com/trinityvoxel/cohostr-wifi-portal
