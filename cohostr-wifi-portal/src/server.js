@@ -377,12 +377,12 @@ function renderPortal(query) {
       <label for="email">Email Address</label>
       <input id="email" name="email" type="email" placeholder="jane@example.com" required autocomplete="email">
 
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+      <button type="submit">Connect to WiFi</button>
+
+      <div style="display:flex;align-items:center;gap:10px;margin-top:16px;">
         <input type="checkbox" id="email_consent" name="email_consent" value="yes" checked style="width:18px;height:18px;margin:0;cursor:pointer;">
         <label for="email_consent" style="margin:0;font-weight:400;font-size:14px;color:#555;cursor:pointer;">Send me discounts on future stays</label>
       </div>
-
-      <button type="submit">Connect to WiFi</button>
     </form>
 </body>
 </html>`;
