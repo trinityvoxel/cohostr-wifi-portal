@@ -263,7 +263,7 @@ function renderPortal(query) {
       <input type="hidden" id="ssid" value="${ssid}">
 
       <button type="submit" id="btn">Connect to WiFi</button>
-      <div class="msg success" id="ok">✓ Connected! Redirecting…</div>
+      <div class="msg success" id="ok">✓ You're connected! You can now close this window and browse normally.</div>
       <div class="msg error" id="err"></div>
     </form>
   </div>
@@ -290,9 +290,11 @@ function renderPortal(query) {
         const data = await res.json();
         if (res.ok) {
           document.getElementById('ok').style.display = 'block';
-          setTimeout(() => {
-            window.location.href = data.redirect || '${property.listingUrl}';
-          }, 2000);
+          document.getElementById('f').style.display = 'none';
+          // Let Unifi handle the redirect — avoids HTTPS cert errors
+          if (data.redirect) {
+            setTimeout(() => { window.location.href = data.redirect; }, 3000);
+          }
         } else {
           throw new Error(data.error || 'Something went wrong');
         }
