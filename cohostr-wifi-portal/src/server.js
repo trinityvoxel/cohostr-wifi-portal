@@ -306,59 +306,101 @@ function renderPortal(query) {
     }
     .card {
       background: white;
-      border-radius: 12px;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-      padding: 40px;
-      max-width: 440px;
+      border-radius: 14px;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+      overflow: hidden;
+      max-width: 420px;
       width: 100%;
     }
-    h1 { font-size: 24px; color: #1a1a1a; margin-bottom: 4px; }
-    .loc { color: #888; font-size: 14px; margin-bottom: 28px; }
-    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }
-    input {
+    .card-header {
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      padding: 20px 24px 18px;
+      text-align: center;
+    }
+    .h-eyebrow {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.14em; color: rgba(255,255,255,0.6); margin-bottom: 4px;
+    }
+    .h-name { font-size: 20px; font-weight: 800; color: #fff; margin-bottom: 3px; }
+    .h-loc  { font-size: 12px; color: rgba(255,255,255,0.55); margin-bottom: 7px; }
+    .h-cta  { font-size: 12.5px; color: rgba(255,255,255,0.85); }
+    .h-cta a { color: #fff; font-weight: 700; text-decoration: underline; }
+    .form-body { padding: 26px 30px 30px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    input[type=text], input[type=email] {
       width: 100%; padding: 11px 14px;
-      border: 1.5px solid #ddd; border-radius: 7px;
-      font-size: 15px; margin-bottom: 16px;
-      transition: border-color 0.2s;
+      border: 1.5px solid #e5e7eb; border-radius: 8px;
+      font-size: 15px; margin-bottom: 14px;
+      font-family: inherit; transition: border-color 0.2s;
     }
-    input:focus { outline: none; border-color: #0070f3; }
+    input[type=text]:focus, input[type=email]:focus { outline: none; border-color: #2563eb; }
     button {
-      width: 100%; padding: 13px;
-      background: #0070f3; color: white;
-      border: none; border-radius: 7px;
-      font-size: 16px; font-weight: 600;
+      width: 100%; padding: 14px;
+      background: #2563eb; color: white;
+      border: none; border-radius: 8px;
+      font-size: 16px; font-weight: 700;
       cursor: pointer; transition: background 0.2s;
+      letter-spacing: 0.01em;
     }
-    button:hover { background: #005fd1; }
-    .msg { margin-top: 14px; font-size: 14px; text-align: center; display: none; }
-    .msg.success { color: #16a34a; }
-    .msg.error { color: #dc2626; }
+    button:hover { background: #1d4ed8; }
+    .book-direct {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 12px 14px;
+      background: #f0fdf4;
+      border: 1.5px solid #bbf7d0;
+      border-radius: 8px;
+      margin-top: 14px;
+    }
+    .book-direct .ico { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+    .book-direct p { font-size: 13px; color: #166534; line-height: 1.45; }
+    .book-direct a { color: #15803d; font-weight: 700; text-decoration: none; }
+    .consent-row {
+      display: flex; align-items: center; gap: 10px; margin-top: 14px;
+    }
+    .consent-row input[type=checkbox] {
+      width: 17px; height: 17px; margin: 0;
+      accent-color: #2563eb; cursor: pointer; flex-shrink: 0;
+    }
+    .consent-row label {
+      margin: 0; font-weight: 400; font-size: 13px; color: #6b7280; cursor: pointer;
+    }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>${property.name}</h1>
-    <div class="loc">${property.location}</div>
+    <div class="card-header">
+      <div class="h-eyebrow">Welcome to</div>
+      <div class="h-name">${property.name}</div>
+      <div class="h-loc">${property.location}</div>
+      <div class="h-cta">Book direct at <a href="https://www.cohostr.com">CohoSTR.com</a> &amp; skip the fees</div>
+    </div>
+    <div class="form-body">
+      <form method="POST" action="/submit">
+        <input type="hidden" name="mac" value="${mac}">
+        <input type="hidden" name="redirect" value="${redirect}">
+        <input type="hidden" name="ap" value="${ap}">
+        <input type="hidden" name="ssid" value="${ssid}">
 
-    <form method="POST" action="/submit">
-      <input type="hidden" name="mac" value="${mac}">
-      <input type="hidden" name="redirect" value="${redirect}">
-      <input type="hidden" name="ap" value="${ap}">
-      <input type="hidden" name="ssid" value="${ssid}">
+        <label for="name">Your Name</label>
+        <input id="name" name="name" type="text" placeholder="Jane Smith" required autocomplete="name">
 
-      <label for="name">Your Name</label>
-      <input id="name" name="name" type="text" placeholder="Jane Smith" required autocomplete="name">
+        <label for="email">Email Address</label>
+        <input id="email" name="email" type="email" placeholder="jane@example.com" required autocomplete="email">
 
-      <label for="email">Email Address</label>
-      <input id="email" name="email" type="email" placeholder="jane@example.com" required autocomplete="email">
+        <button type="submit">Connect to WiFi</button>
 
-      <button type="submit">Connect to WiFi</button>
+        <div class="book-direct">
+          <span class="ico">🏡</span>
+          <p>Skip the OTA fees — <a href="https://www.cohostr.com"><strong>book direct at CohoSTR.com</strong></a> and save on your next stay.</p>
+        </div>
 
-      <div style="display:flex;align-items:center;gap:10px;margin-top:16px;">
-        <input type="checkbox" id="email_consent" name="email_consent" value="yes" checked style="width:18px;height:18px;margin:0;cursor:pointer;">
-        <label for="email_consent" style="margin:0;font-weight:400;font-size:14px;color:#555;cursor:pointer;">Send me discounts on future stays</label>
-      </div>
-    </form>
+        <div class="consent-row">
+          <input type="checkbox" id="email_consent" name="email_consent" value="yes" checked>
+          <label for="email_consent">Send me discounts on future stays</label>
+        </div>
+      </form>
+    </div>
+  </div>
 </body>
 </html>`;
 }
