@@ -250,63 +250,20 @@ function renderPortal(query) {
     <h1>${property.name}</h1>
     <div class="loc">${property.location}</div>
 
-    <form id="f">
+    <form method="POST" action="/submit">
+      <input type="hidden" name="mac" value="${mac}">
+      <input type="hidden" name="redirect" value="${redirect}">
+      <input type="hidden" name="ap" value="${ap}">
+      <input type="hidden" name="ssid" value="${ssid}">
+
       <label for="name">Your Name</label>
-      <input id="name" type="text" placeholder="Jane Smith" required autocomplete="name">
+      <input id="name" name="name" type="text" placeholder="Jane Smith" required autocomplete="name">
 
       <label for="email">Email Address</label>
-      <input id="email" type="email" placeholder="jane@example.com" required autocomplete="email">
+      <input id="email" name="email" type="email" placeholder="jane@example.com" required autocomplete="email">
 
-      <input type="hidden" id="mac" value="${mac}">
-      <input type="hidden" id="redirect" value="${redirect}">
-      <input type="hidden" id="ap" value="${ap}">
-      <input type="hidden" id="ssid" value="${ssid}">
-
-      <button type="submit" id="btn">Connect to WiFi</button>
-      <div class="msg success" id="ok">✓ You're connected! You can now close this window and browse normally.</div>
-      <div class="msg error" id="err"></div>
+      <button type="submit">Connect to WiFi</button>
     </form>
-  </div>
-  <script>
-    document.getElementById('f').addEventListener('submit', async e => {
-      e.preventDefault();
-      const btn = document.getElementById('btn');
-      btn.disabled = true; btn.textContent = 'Connecting…';
-
-      try {
-        const res = await fetch('/submit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: document.getElementById('name').value.trim(),
-            email: document.getElementById('email').value.trim(),
-            mac: document.getElementById('mac').value,
-            redirect: document.getElementById('redirect').value,
-            ap: document.getElementById('ap').value,
-            ssid: document.getElementById('ssid').value,
-          }),
-        });
-
-        const data = await res.json();
-        if (res.ok) {
-          document.getElementById('ok').style.display = 'block';
-          document.getElementById('f').style.display = 'none';
-          // Let Unifi handle the redirect — avoids HTTPS cert errors
-          if (data.redirect) {
-            setTimeout(() => { window.location.href = data.redirect; }, 3000);
-          }
-        } else {
-          throw new Error(data.error || 'Something went wrong');
-        }
-      } catch (err) {
-        const el = document.getElementById('err');
-        el.textContent = err.message;
-        el.style.display = 'block';
-        btn.disabled = false;
-        btn.textContent = 'Connect to WiFi';
-      }
-    });
-  </script>
 </body>
 </html>`;
 }
@@ -345,11 +302,16 @@ const server = http.createServer(async (req, res) => {
     req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
       try {
-        const { name, email, mac, redirect } = JSON.parse(body);
+        // Parse URL-encoded form data
+        const params = new URLSearchParams(body);
+        const name = params.get('name') || '';
+        const email = params.get('email') || '';
+        const mac = params.get('mac') || '';
+        const redirect = params.get('redirect') || '';
 
         if (!name || !email) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Name and email are required' }));
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end('<p>Name and email are required. <a href="/">Go back</a></p>');
           return;
         }
 
@@ -363,15 +325,43 @@ const server = http.createServer(async (req, res) => {
           await authorizeGuest(mac);
         }
 
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          success: true,
-          redirect: redirect || property.listingUrl,
-        }));
+        // Return HTML success page — no external redirects that could cert-error
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connected!</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh; display: flex; align-items: center;
+      justify-content: center; background: #f0fdf4; padding: 20px;
+    }
+    .card {
+      background: white; border-radius: 12px; padding: 40px;
+      max-width: 440px; width: 100%; text-align: center;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    }
+    .check { font-size: 56px; margin-bottom: 16px; }
+    h1 { font-size: 24px; color: #16a34a; margin-bottom: 8px; }
+    p { color: #555; font-size: 15px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="check">✅</div>
+    <h1>You're connected!</h1>
+    <p>Welcome to ${property.name}.<br>You can now close this window and browse normally.</p>
+  </div>
+</body>
+</html>`);
       } catch (err) {
         console.error('Submit error:', err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Server error' }));
+        res.writeHead(500, { 'Content-Type': 'text/html' });
+        res.end('<p>Server error. Please try again. <a href="/">Go back</a></p>');
       }
     });
     return;
