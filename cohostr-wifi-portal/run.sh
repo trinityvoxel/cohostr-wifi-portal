@@ -16,6 +16,7 @@ export CF_API_TOKEN=$(bashio::config 'cloudflare_api_token')
 export GOOGLE_SHEET_ID=$(bashio::config 'google_sheet_id')
 export GOOGLE_CLIENT_EMAIL=$(bashio::config 'google_client_email')
 export GOOGLE_PRIVATE_KEY=$(bashio::config 'google_private_key')
+export DASHBOARD_WEBHOOK=$(bashio::config 'dashboard_webhook')
 
 bashio::log.info "Starting CohoSTR WiFi Portal for property: ${PROPERTY_NAME} (${PROPERTY_ID}) on port ${PORT}"
 
