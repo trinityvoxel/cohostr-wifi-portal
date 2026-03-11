@@ -536,6 +536,9 @@ async function notifyDashboard(name, email, mac, emailConsent) {
     propertyName: property.name,
     name, email, mac, emailConsent,
     timestamp: new Date().toISOString()
+  const result = await notifyDashboard(name, email, mac, emailConsent);
+  const minutes = result?.wifiMinutes || 480;
+    if (mac) await authorizeGuest(mac, minutes);
   });
   // POST to dashboard webhook — fire and forget
   // Dashboard returns { wifiMinutes: 4320 } based on checkout date
