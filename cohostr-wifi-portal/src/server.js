@@ -528,3 +528,15 @@ downloadImage(property.image, IMAGE_CACHE_PATH)
       console.log(`Portal running at http://0.0.0.0:${PORT} — ${property.name}`);
     });
   });
+
+// After authorizing on UniFi, fire webhook to dashboard
+async function notifyDashboard(name, email, mac, emailConsent) {
+  const payload = JSON.stringify({
+    propertyId: PROPERTY_ID,
+    propertyName: property.name,
+    name, email, mac, emailConsent,
+    timestamp: new Date().toISOString()
+  });
+  // POST to dashboard webhook — fire and forget
+  // Dashboard returns { wifiMinutes: 4320 } based on checkout date
+}
