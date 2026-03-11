@@ -29,6 +29,8 @@ const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 
+const DASHBOARD_WEBHOOK = process.env.DASHBOARD_WEBHOOK || 'https://app.cohostr.com/api/webhooks/wifi-portal';
+
 console.log(`CohoSTR WiFi Portal starting — ${property.name} on port ${PORT}`);
 
 // ─── Image Cache ──────────────────────────────────────────────────────────────
@@ -278,6 +280,70 @@ async function storeInD1(name, email, mac, emailConsent = false) {
   }
 }
 
+// ─── Dashboard Webhook ────────────────────────────────────────────────────────
+
+async function notifyDashboard(name, email, mac, emailConsent) {
+  try {
+    const payload = JSON.stringify({
+      propertyId: PROPERTY_ID,
+      propertyName: property.name,
+      name,
+      email,
+      mac,
+      emailConsent,
+      timestamp: new Date().toISOString(),
+    });
+
+    const webhookUrl = new URL(DASHBOARD_WEBHOOK);
+
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: webhookUrl.hostname,
+        port: 443,
+        path: webhookUrl.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const result = JSON.parse(data);
+            console.log(`Dashboard webhook response: ${JSON.stringify(result)}`);
+            resolve(result);
+          } catch {
+            console.warn('Dashboard returned non-JSON response');
+            resolve(null);
+          }
+        });
+      });
+
+      req.on('error', (err) => {
+        console.error('Dashboard webhook failed:', err.message);
+        resolve(null); // Don't reject — WiFi auth should still work
+      });
+
+      // 5 second timeout so guests aren't waiting forever
+      req.setTimeout(5000, () => {
+        req.destroy();
+        console.warn('Dashboard webhook timed out');
+        resolve(null);
+      });
+
+      req.write(payload);
+      req.end();
+    });
+  } catch (err) {
+    console.error('Dashboard notify error:', err.message);
+    return null;
+  }
+}
+
 // ─── Portal HTML ──────────────────────────────────────────────────────────────
 
 function renderPortal(query) {
@@ -390,7 +456,7 @@ function renderPortal(query) {
         <button type="submit">Connect to WiFi</button>
 
         <div class="book-direct">
-          <span class="ico">🏡</span>
+          <span class="ico">\uD83C\uDFE1</span>
           <p>Skip the OTA fees — <a href="https://www.cohostr.com"><strong>book direct at CohoSTR.com</strong></a> and save on your next stay.</p>
         </div>
 
@@ -460,9 +526,13 @@ const server = http.createServer(async (req, res) => {
         storeInD1(name, email, mac, emailConsent).catch(console.error);
         syncToGoogleSheets(name, email, property.name, timestamp, emailConsent).catch(console.error);
 
-        // Authorize guest in Unifi
+        // Notify dashboard + get dynamic WiFi duration based on checkout date
+        const dashResult = await notifyDashboard(name, email, mac, emailConsent);
+        const wifiMinutes = dashResult?.wifiMinutes || 480;
+
+        // Authorize guest in Unifi with checkout-aware duration
         if (mac) {
-          await authorizeGuest(mac);
+          await authorizeGuest(mac, wifiMinutes);
         }
 
         // Return HTML success page — no external redirects that could cert-error
@@ -492,7 +562,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <div class="card">
-    <div class="check">✅</div>
+    <div class="check">\u2705</div>
     <h1>You're connected!</h1>
     <p>Welcome to ${property.name}.<br>You can now close this window and browse normally.</p>
   </div>
@@ -528,18 +598,3 @@ downloadImage(property.image, IMAGE_CACHE_PATH)
       console.log(`Portal running at http://0.0.0.0:${PORT} — ${property.name}`);
     });
   });
-
-// After authorizing on UniFi, fire webhook to dashboard
-async function notifyDashboard(name, email, mac, emailConsent) {
-  const payload = JSON.stringify({
-    propertyId: PROPERTY_ID,
-    propertyName: property.name,
-    name, email, mac, emailConsent,
-    timestamp: new Date().toISOString()
-  const result = await notifyDashboard(name, email, mac, emailConsent);
-  const minutes = result?.wifiMinutes || 480;
-    if (mac) await authorizeGuest(mac, minutes);
-  });
-  // POST to dashboard webhook — fire and forget
-  // Dashboard returns { wifiMinutes: 4320 } based on checkout date
-}
