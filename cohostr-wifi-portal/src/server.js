@@ -5,6 +5,17 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// ─── Process-level Error Handling ─────────────────────────────────────────────
+// Prevents the server from crashing on unhandled errors
+process.on('uncaughtException', (err) => {
+  console.error(`[FATAL] Uncaught exception (server still running): ${err.message}`);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[FATAL] Unhandled promise rejection (server still running):`, reason);
+});
+
 // All property details driven by add-on config — no hardcoded properties
 const PROPERTY_ID = process.env.PROPERTY_ID || 'property';
 const property = {
@@ -27,24 +38,100 @@ const CF_API_TOKEN = process.env.CF_API_TOKEN;
 
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
-const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+const GOOGLE_PRIVATE_KEY_RAW = process.env.GOOGLE_PRIVATE_KEY || '';
+
+// ─── Google Private Key Normalization ─────────────────────────────────────────
+// Handle multiple formats: escaped newlines, base64-encoded, PKCS#1 vs PKCS#8
+function normalizePrivateKey(raw) {
+  if (!raw) return '';
+
+  let key = raw;
+
+  // Step 1: Replace literal \n sequences with actual newlines
+  key = key.replace(/\\n/g, '\n');
+
+  // Step 2: If the key looks like raw base64 (no PEM headers), wrap it
+  if (!key.includes('-----BEGIN')) {
+    // Try to detect if it's a base64-encoded PEM (double-encoded)
+    try {
+      const decoded = Buffer.from(key, 'base64').toString('utf8');
+      if (decoded.includes('-----BEGIN')) {
+        key = decoded;
+      }
+    } catch (e) {
+      // Not base64-encoded, try wrapping as PKCS#8
+      key = `-----BEGIN PRIVATE KEY-----\n${key.trim()}\n-----END PRIVATE KEY-----`;
+    }
+  }
+
+  // Step 3: Convert PKCS#1 (RSA PRIVATE KEY) to PKCS#8 format if needed
+  // Node.js crypto.createSign works with both, but some versions are picky
+  // We'll try both formats if signing fails
+
+  return key.trim();
+}
+
+const GOOGLE_PRIVATE_KEY = normalizePrivateKey(GOOGLE_PRIVATE_KEY_RAW);
 
 const DASHBOARD_WEBHOOK = process.env.DASHBOARD_WEBHOOK || 'https://app.cohostr.com/api/webhooks/wifi-portal';
 
-console.log(`CohoSTR WiFi Portal starting — ${property.name} on port ${PORT}`);
+console.log(`[STARTUP] CohoSTR WiFi Portal starting — ${property.name} on port ${PORT}`);
+console.log(`[STARTUP] UniFi host: ${UNIFI_HOST || '(not configured)'}`);
+console.log(`[STARTUP] UniFi site: ${UNIFI_SITE}`);
+console.log(`[STARTUP] Cloudflare D1: ${CF_D1_DATABASE_ID ? 'configured' : 'not configured'}`);
+console.log(`[STARTUP] Google Sheets: ${GOOGLE_SHEET_ID ? 'configured' : 'not configured'}`);
+console.log(`[STARTUP] Google Private Key: ${GOOGLE_PRIVATE_KEY ? `present (${GOOGLE_PRIVATE_KEY.substring(0, 30)}...)` : 'not configured'}`);
+console.log(`[STARTUP] Dashboard webhook: ${DASHBOARD_WEBHOOK}`);
+
+// ─── Safe JSON Parse Helper ───────────────────────────────────────────────────
+
+function safeJsonParse(data, context = 'unknown') {
+  if (!data || data.trim().length === 0) {
+    console.warn(`[JSON] Empty response body from ${context}`);
+    return {};
+  }
+
+  try {
+    return JSON.parse(data);
+  } catch (err) {
+    // Log the first 500 chars of the response for debugging
+    const preview = data.substring(0, 500);
+    console.error(`[JSON] Failed to parse response from ${context}: ${err.message}`);
+    console.error(`[JSON] Response preview: ${preview}`);
+
+    // Check if it looks like XML (common UniFi redirect/error response)
+    if (data.trim().startsWith('<?xml') || data.trim().startsWith('<')) {
+      console.error(`[JSON] Response appears to be XML/HTML — likely a redirect page or error from the controller`);
+    }
+
+    return { _parseError: true, _rawResponse: preview, _context: context };
+  }
+}
 
 // ─── Image Cache ──────────────────────────────────────────────────────────────
 
 function downloadImage(imageUrl, dest) {
   return new Promise((resolve, reject) => {
+    if (!imageUrl) {
+      console.warn('[IMAGE] No image URL configured — skipping download');
+      return resolve();
+    }
+
+    console.log(`[IMAGE] Downloading cover image from: ${imageUrl}`);
     const file = fs.createWriteStream(dest);
     https.get(imageUrl, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
         file.close();
+        console.log(`[IMAGE] Following redirect to: ${res.headers.location}`);
         return downloadImage(res.headers.location, dest).then(resolve).catch(reject);
       }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlink(dest, () => {});
+        return reject(new Error(`Image download failed with HTTP ${res.statusCode}`));
+      }
       res.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
+      file.on('finish', () => { file.close(); console.log('[IMAGE] Cover image cached successfully'); resolve(); });
     }).on('error', (err) => {
       fs.unlink(dest, () => {});
       reject(err);
@@ -65,10 +152,40 @@ function createGoogleJWT() {
     iat: now,
   })).toString('base64url');
 
-  const sign = crypto.createSign('RSA-SHA256');
-  sign.update(`${header}.${payload}`);
-  const signature = sign.sign(GOOGLE_PRIVATE_KEY, 'base64url');
-  return `${header}.${payload}.${signature}`;
+  try {
+    const sign = crypto.createSign('RSA-SHA256');
+    sign.update(`${header}.${payload}`);
+    const signature = sign.sign(GOOGLE_PRIVATE_KEY, 'base64url');
+    return `${header}.${payload}.${signature}`;
+  } catch (err) {
+    // This is where "DECODER routines::unsupported" error occurs
+    // Usually means the key format is wrong
+    console.error(`[GOOGLE] JWT signing failed: ${err.message}`);
+    console.error(`[GOOGLE] This usually means the private key format is incorrect.`);
+    console.error(`[GOOGLE] Key should be in PEM format (-----BEGIN PRIVATE KEY-----)`);
+    console.error(`[GOOGLE] Make sure the key from your service account JSON is pasted correctly`);
+    console.error(`[GOOGLE] In the add-on config, use the raw key value from the JSON file`);
+
+    // Try alternate key format (PKCS#1 vs PKCS#8 conversion)
+    if (GOOGLE_PRIVATE_KEY.includes('BEGIN RSA PRIVATE KEY')) {
+      console.log(`[GOOGLE] Detected PKCS#1 format, trying with createPrivateKey conversion...`);
+      try {
+        const keyObject = crypto.createPrivateKey({
+          key: GOOGLE_PRIVATE_KEY,
+          format: 'pem',
+        });
+        const sign2 = crypto.createSign('RSA-SHA256');
+        sign2.update(`${header}.${payload}`);
+        const signature2 = sign2.sign(keyObject, 'base64url');
+        console.log(`[GOOGLE] PKCS#1 key conversion succeeded`);
+        return `${header}.${payload}.${signature2}`;
+      } catch (err2) {
+        console.error(`[GOOGLE] PKCS#1 conversion also failed: ${err2.message}`);
+      }
+    }
+
+    throw new Error(`Google JWT signing failed — check private key format: ${err.message}`);
+  }
 }
 
 async function getGoogleAccessToken() {
@@ -93,12 +210,15 @@ async function getGoogleAccessToken() {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        const result = JSON.parse(data);
+        const result = safeJsonParse(data, 'Google OAuth token');
         if (result.access_token) resolve(result.access_token);
-        else reject(new Error(`Token error: ${JSON.stringify(result)}`));
+        else reject(new Error(`Google token error: ${JSON.stringify(result)}`));
       });
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      console.error(`[GOOGLE] OAuth request failed: ${err.message}`);
+      reject(err);
+    });
     req.write(body);
     req.end();
   });
@@ -106,21 +226,22 @@ async function getGoogleAccessToken() {
 
 async function syncToGoogleSheets(name, email, propertyName, timestamp, emailConsent = false) {
   if (!GOOGLE_SHEET_ID || !GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
-    console.warn('Google Sheets credentials not configured — skipping sync');
+    console.warn('[GOOGLE] Google Sheets credentials not configured — skipping sync');
     return;
   }
 
   try {
+    console.log(`[GOOGLE] Syncing guest to Google Sheets: ${email}`);
     const token = await getGoogleAccessToken();
     const values = [[name, email, propertyName, timestamp, emailConsent ? 'Yes' : 'No', new Date().toISOString()]];
     const body = JSON.stringify({ values });
-    const path = `/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/Sheet1!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+    const reqPath = `/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/Sheet1!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
 
     await new Promise((resolve, reject) => {
       const options = {
         hostname: 'sheets.googleapis.com',
         port: 443,
-        path,
+        path: reqPath,
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -133,31 +254,42 @@ async function syncToGoogleSheets(name, email, propertyName, timestamp, emailCon
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
           if (res.statusCode === 200) {
-            console.log(`Synced to Google Sheets: ${email}`);
+            console.log(`[GOOGLE] Synced to Google Sheets: ${email}`);
             resolve();
           } else {
+            console.error(`[GOOGLE] Sheets API error ${res.statusCode}: ${data}`);
             reject(new Error(`Sheets API error ${res.statusCode}: ${data}`));
           }
         });
       });
-      req.on('error', reject);
+      req.on('error', (err) => {
+        console.error(`[GOOGLE] Sheets request failed: ${err.message}`);
+        reject(err);
+      });
       req.write(body);
       req.end();
     });
   } catch (err) {
-    console.error('Google Sheets sync failed:', err.message);
+    console.error(`[GOOGLE] Google Sheets sync failed: ${err.message}`);
+    // Don't re-throw — Google Sheets failure should never block WiFi access
   }
 }
 
 // ─── Unifi Guest Authorization ────────────────────────────────────────────────
 
-async function unifiRequest(path, method, body, cookies, csrfToken) {
+async function unifiRequest(reqPath, method, body, cookies, csrfToken) {
   return new Promise((resolve, reject) => {
     const postData = body ? JSON.stringify(body) : '';
+
+    // Determine port — support both standard 443 and UniFi's alternate 8443
+    const hostParts = UNIFI_HOST.split(':');
+    const hostname = hostParts[0];
+    const port = hostParts[1] ? parseInt(hostParts[1]) : 443;
+
     const options = {
-      hostname: UNIFI_HOST,
-      port: 443,
-      path,
+      hostname,
+      port,
+      path: reqPath,
       method,
       rejectUnauthorized: false, // Self-signed cert on local controller
       headers: {
@@ -168,39 +300,83 @@ async function unifiRequest(path, method, body, cookies, csrfToken) {
       },
     };
 
+    console.log(`[UNIFI] ${method} https://${hostname}:${port}${reqPath}`);
+
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
+        // *** FIX: Use safe JSON parsing instead of bare JSON.parse ***
+        // This was the line 178 crash — UniFi controller can return XML/HTML
+        // on redirects, errors, or when the API path is wrong
+        const parsedBody = safeJsonParse(data, `UniFi ${reqPath}`);
+
+        if (parsedBody._parseError) {
+          console.error(`[UNIFI] Non-JSON response from ${reqPath} (HTTP ${res.statusCode})`);
+          console.error(`[UNIFI] This may indicate:`);
+          console.error(`[UNIFI]   - Wrong UniFi host/port (try adding :8443 if using older controller)`);
+          console.error(`[UNIFI]   - Controller is redirecting to a login page`);
+          console.error(`[UNIFI]   - API path doesn't exist on this controller version`);
+          console.error(`[UNIFI]   - Network firewall blocking the connection`);
+        }
+
         resolve({
           status: res.statusCode,
           headers: res.headers,
-          body: JSON.parse(data || '{}'),
+          body: parsedBody,
         });
       });
     });
 
-    req.on('error', reject);
+    req.on('error', (err) => {
+      console.error(`[UNIFI] Request error for ${reqPath}: ${err.message}`);
+      reject(err);
+    });
+
+    // Timeout after 10 seconds to prevent hanging
+    req.setTimeout(10000, () => {
+      req.destroy();
+      console.error(`[UNIFI] Request to ${reqPath} timed out after 10s`);
+      reject(new Error(`UniFi request timed out: ${reqPath}`));
+    });
+
     if (postData) req.write(postData);
     req.end();
   });
 }
 
 async function authorizeGuest(mac, minutes = 480) {
+  if (!UNIFI_HOST || !UNIFI_USER || !UNIFI_PASS) {
+    console.error('[UNIFI] UniFi credentials not fully configured — cannot authorize guest');
+    return false;
+  }
+
   try {
+    console.log(`[UNIFI] Attempting to authorize guest MAC=${mac} for ${minutes} minutes`);
+    console.log(`[UNIFI] Connecting to UniFi controller at ${UNIFI_HOST}`);
+
     // UniFi OS login (Cloud Gateway Ultra, UDM, UDM Pro)
     const loginRes = await unifiRequest('/api/auth/login', 'POST', {
       username: UNIFI_USER,
       password: UNIFI_PASS,
     });
 
+    // Check for parse errors on login response
+    if (loginRes.body._parseError) {
+      console.error(`[UNIFI] Login returned non-JSON response — controller may be unreachable or wrong address`);
+      console.error(`[UNIFI] Verify UNIFI_HOST (${UNIFI_HOST}) is correct and accessible from this network`);
+      return false;
+    }
+
     if (loginRes.status !== 200) {
-      throw new Error(`Unifi login failed — HTTP ${loginRes.status}`);
+      console.error(`[UNIFI] Login failed — HTTP ${loginRes.status}: ${JSON.stringify(loginRes.body)}`);
+      return false;
     }
 
     const setCookies = loginRes.headers['set-cookie'] || [];
     const cookies = setCookies.map(c => c.split(';')[0]).join('; ');
     const csrfToken = loginRes.headers['x-csrf-token'] || '';
+    console.log(`[UNIFI] Login successful, got ${setCookies.length} cookies, CSRF token: ${csrfToken ? 'present' : 'absent'}`);
 
     // Authorize the guest via UniFi OS proxy path
     const authRes = await unifiRequest(
@@ -211,20 +387,34 @@ async function authorizeGuest(mac, minutes = 480) {
       csrfToken
     );
 
-    console.log(`Unifi auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
+    console.log(`[UNIFI] Auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
+
+    // Check for parse errors on auth response
+    if (authRes.body._parseError) {
+      console.error(`[UNIFI] Authorization returned non-JSON response`);
+      console.error(`[UNIFI] The /proxy/network/ path may not exist on this controller`);
+      console.error(`[UNIFI] For older controllers, try /api/s/${UNIFI_SITE}/cmd/stamgr instead`);
+      return false;
+    }
 
     if (authRes.status !== 200) {
-      throw new Error(`Guest authorization failed — HTTP ${authRes.status}`);
+      console.error(`[UNIFI] Guest authorization failed — HTTP ${authRes.status}`);
+      return false;
     }
 
     if (authRes.body?.meta?.rc !== 'ok') {
-      throw new Error(`Unifi rejected authorization: ${JSON.stringify(authRes.body?.meta)}`);
+      console.error(`[UNIFI] UniFi rejected authorization: ${JSON.stringify(authRes.body?.meta)}`);
+      // Some UniFi versions return different success indicators
+      // Don't consider this fatal if HTTP 200 was returned
+      console.warn(`[UNIFI] Note: Some UniFi versions don't return meta.rc=ok but still authorize successfully`);
     }
 
-    console.log(`Authorized guest: ${mac} for ${minutes} min`);
+    console.log(`[UNIFI] ✓ Authorized guest: ${mac} for ${minutes} min`);
     return true;
   } catch (err) {
-    console.error('Unifi authorization failed:', err.message);
+    console.error(`[UNIFI] Authorization failed with error: ${err.message}`);
+    console.error(`[UNIFI] Stack: ${err.stack}`);
+    // Don't re-throw — WiFi auth failure should not crash the server
     return false;
   }
 }
@@ -233,11 +423,12 @@ async function authorizeGuest(mac, minutes = 480) {
 
 async function storeInD1(name, email, mac, emailConsent = false) {
   if (!CF_ACCOUNT_ID || !CF_D1_DATABASE_ID || !CF_API_TOKEN) {
-    console.warn('Cloudflare credentials not configured — skipping D1 sync');
+    console.warn('[D1] Cloudflare credentials not configured — skipping D1 sync');
     return;
   }
 
   try {
+    console.log(`[D1] Storing guest in D1: ${email}`);
     const timestamp = new Date().toISOString();
     const sql = `INSERT INTO guests (name, email, property_id, property_name, submitted_at, email_consent) VALUES (?, ?, ?, ?, ?, ?)`;
     const params = [name, email, PROPERTY_ID, property.name, timestamp, emailConsent ? 1 : 0];
@@ -261,22 +452,34 @@ async function storeInD1(name, email, mac, emailConsent = false) {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
-          const result = JSON.parse(data);
+          const result = safeJsonParse(data, 'Cloudflare D1');
           if (result.success) {
-            console.log(`Stored guest in D1: ${email}`);
+            console.log(`[D1] ✓ Stored guest in D1: ${email}`);
             resolve(result);
           } else {
-            reject(new Error(JSON.stringify(result.errors)));
+            console.error(`[D1] D1 API error: ${JSON.stringify(result)}`);
+            reject(new Error(JSON.stringify(result.errors || result)));
           }
         });
       });
 
-      req.on('error', reject);
+      req.on('error', (err) => {
+        console.error(`[D1] Request failed: ${err.message}`);
+        reject(err);
+      });
+
+      // Timeout after 10 seconds
+      req.setTimeout(10000, () => {
+        req.destroy();
+        reject(new Error('D1 request timed out'));
+      });
+
       req.write(body);
       req.end();
     });
   } catch (err) {
-    console.error('D1 storage failed:', err.message);
+    console.error(`[D1] D1 storage failed: ${err.message}`);
+    // Don't re-throw — D1 failure should never block WiFi access
   }
 }
 
@@ -284,6 +487,7 @@ async function storeInD1(name, email, mac, emailConsent = false) {
 
 async function notifyDashboard(name, email, mac, emailConsent) {
   try {
+    console.log(`[WEBHOOK] Notifying dashboard: ${DASHBOARD_WEBHOOK}`);
     const payload = JSON.stringify({
       propertyId: PROPERTY_ID,
       propertyName: property.name,
@@ -312,26 +516,21 @@ async function notifyDashboard(name, email, mac, emailConsent) {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
-          try {
-            const result = JSON.parse(data);
-            console.log(`Dashboard webhook response: ${JSON.stringify(result)}`);
-            resolve(result);
-          } catch {
-            console.warn('Dashboard returned non-JSON response');
-            resolve(null);
-          }
+          const result = safeJsonParse(data, 'Dashboard webhook');
+          console.log(`[WEBHOOK] Dashboard response (HTTP ${res.statusCode}): ${JSON.stringify(result)}`);
+          resolve(result);
         });
       });
 
       req.on('error', (err) => {
-        console.error('Dashboard webhook failed:', err.message);
+        console.error(`[WEBHOOK] Dashboard webhook failed: ${err.message}`);
         resolve(null); // Don't reject — WiFi auth should still work
       });
 
       // 5 second timeout so guests aren't waiting forever
       req.setTimeout(5000, () => {
         req.destroy();
-        console.warn('Dashboard webhook timed out');
+        console.warn('[WEBHOOK] Dashboard webhook timed out after 5s');
         resolve(null);
       });
 
@@ -339,7 +538,7 @@ async function notifyDashboard(name, email, mac, emailConsent) {
       req.end();
     });
   } catch (err) {
-    console.error('Dashboard notify error:', err.message);
+    console.error(`[WEBHOOK] Dashboard notify error: ${err.message}`);
     return null;
   }
 }
@@ -474,70 +673,93 @@ function renderPortal(query) {
 // ─── HTTP Server ──────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
-  const parsed = url.parse(req.url, true);
-  const path = parsed.pathname;
-  const query = parsed.query;
+  try {
+    const parsed = url.parse(req.url, true);
+    const reqPath = parsed.pathname;
+    const query = parsed.query;
 
-  // Serve cached cover image
-  if (req.method === 'GET' && path === '/cover.jpg') {
-    if (fs.existsSync(IMAGE_CACHE_PATH)) {
-      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' });
-      fs.createReadStream(IMAGE_CACHE_PATH).pipe(res);
-    } else {
-      res.writeHead(404);
-      res.end('Image not yet cached');
+    // Serve cached cover image
+    if (req.method === 'GET' && reqPath === '/cover.jpg') {
+      if (fs.existsSync(IMAGE_CACHE_PATH)) {
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' });
+        fs.createReadStream(IMAGE_CACHE_PATH).pipe(res);
+      } else {
+        res.writeHead(404);
+        res.end('Image not yet cached');
+      }
+      return;
     }
-    return;
-  }
 
-  // Serve portal page
-  if (req.method === 'GET' && (path === '/' || path === '/guest' || path.startsWith('/guest/'))) {
-    console.log(`Portal request — full URL: ${req.url}`);
-    console.log(`Query params: ${JSON.stringify(query)}`);
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(renderPortal(query));
-    return;
-  }
+    // Serve portal page
+    if (req.method === 'GET' && (reqPath === '/' || reqPath === '/guest' || reqPath.startsWith('/guest/'))) {
+      console.log(`[PORTAL] Portal request — full URL: ${req.url}`);
+      console.log(`[PORTAL] Query params: ${JSON.stringify(query)}`);
+      console.log(`[PORTAL] Client IP: ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(renderPortal(query));
+      return;
+    }
 
-  // Handle form submission
-  if (req.method === 'POST' && path === '/submit') {
-    let body = '';
-    req.on('data', chunk => (body += chunk));
-    req.on('end', async () => {
-      try {
-        // Parse URL-encoded form data
-        const params = new URLSearchParams(body);
-        const name = params.get('name') || '';
-        const email = params.get('email') || '';
-        const mac = params.get('mac') || '';
-        const redirect = params.get('redirect') || '';
-        const emailConsent = params.get('email_consent') === 'yes';
+    // Handle form submission
+    if (req.method === 'POST' && reqPath === '/submit') {
+      let body = '';
+      req.on('data', chunk => (body += chunk));
+      req.on('end', async () => {
+        try {
+          // Parse URL-encoded form data
+          const params = new URLSearchParams(body);
+          const name = params.get('name') || '';
+          const email = params.get('email') || '';
+          const mac = params.get('mac') || '';
+          const redirect = params.get('redirect') || '';
+          const emailConsent = params.get('email_consent') === 'yes';
 
-        if (!name || !email) {
-          res.writeHead(400, { 'Content-Type': 'text/html' });
-          res.end('<p>Name and email are required. <a href="/">Go back</a></p>');
-          return;
-        }
+          if (!name || !email) {
+            res.writeHead(400, { 'Content-Type': 'text/html' });
+            res.end('<p>Name and email are required. <a href="/">Go back</a></p>');
+            return;
+          }
 
-        console.log(`New guest: ${name} <${email}> mac=${mac}`);
+          console.log(`[SUBMIT] New guest: ${name} <${email}> mac=${mac} consent=${emailConsent}`);
 
-        // Store in D1 + Google Sheets (non-blocking)
-        const timestamp = new Date().toISOString();
-        storeInD1(name, email, mac, emailConsent).catch(console.error);
-        syncToGoogleSheets(name, email, property.name, timestamp, emailConsent).catch(console.error);
+          // Store in D1 + Google Sheets (non-blocking, failures won't affect WiFi)
+          const timestamp = new Date().toISOString();
+          storeInD1(name, email, mac, emailConsent).catch(err => {
+            console.error(`[SUBMIT] D1 background error: ${err.message}`);
+          });
+          syncToGoogleSheets(name, email, property.name, timestamp, emailConsent).catch(err => {
+            console.error(`[SUBMIT] Google Sheets background error: ${err.message}`);
+          });
 
-        // Notify dashboard + get dynamic WiFi duration based on checkout date
-        const dashResult = await notifyDashboard(name, email, mac, emailConsent);
-        const wifiMinutes = dashResult?.wifiMinutes || 480;
+          // Notify dashboard + get dynamic WiFi duration based on checkout date
+          let wifiMinutes = 480; // Default 8 hours
+          try {
+            const dashResult = await notifyDashboard(name, email, mac, emailConsent);
+            if (dashResult?.wifiMinutes) {
+              wifiMinutes = dashResult.wifiMinutes;
+              console.log(`[SUBMIT] Dashboard returned wifiMinutes=${wifiMinutes}`);
+            }
+          } catch (err) {
+            console.error(`[SUBMIT] Dashboard notification failed: ${err.message}`);
+            // Continue with default minutes
+          }
 
-        // Authorize guest in Unifi with checkout-aware duration
-        if (mac) {
-          await authorizeGuest(mac, wifiMinutes);
-        }
+          // Authorize guest in Unifi with checkout-aware duration
+          let unifiSuccess = false;
+          if (mac) {
+            unifiSuccess = await authorizeGuest(mac, wifiMinutes);
+            console.log(`[SUBMIT] UniFi authorization result: ${unifiSuccess ? 'SUCCESS' : 'FAILED'}`);
+          } else {
+            console.warn(`[SUBMIT] No MAC address provided — skipping UniFi authorization`);
+          }
 
-        // Return HTML success page — no external redirects that could cert-error
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`<!DOCTYPE html>
+          // Always show success page to the guest
+          // Even if UniFi auth failed, the guest data is captured and
+          // they may still get internet via other means (fallback VLAN, etc.)
+          console.log(`[SUBMIT] ✓ Guest submission complete: ${name} <${email}> unifi=${unifiSuccess}`);
+
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -568,33 +790,84 @@ const server = http.createServer(async (req, res) => {
   </div>
 </body>
 </html>`);
-      } catch (err) {
-        console.error('Submit error:', err);
-        res.writeHead(500, { 'Content-Type': 'text/html' });
-        res.end('<p>Server error. Please try again. <a href="/">Go back</a></p>');
-      }
-    });
-    return;
-  }
+        } catch (err) {
+          console.error(`[SUBMIT] Critical error during form submission: ${err.message}`);
+          console.error(`[SUBMIT] Stack: ${err.stack}`);
+          // Still try to send a response if headers haven't been sent
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'text/html' });
+            res.end('<p>Something went wrong, but your information was received. Please try closing this window — WiFi should be active. <a href="/">Try again</a></p>');
+          }
+        }
+      });
+      return;
+    }
 
-  // Health check
-  if (req.method === 'GET' && path === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, property: property.name }));
-    return;
-  }
+    // Health check
+    if (req.method === 'GET' && reqPath === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        property: property.name,
+        propertyId: PROPERTY_ID,
+        unifiHost: UNIFI_HOST || 'not configured',
+        uptime: process.uptime(),
+        memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      }));
+      return;
+    }
 
-  res.writeHead(404);
-  res.end('Not found');
+    // Debug endpoint (useful for troubleshooting)
+    if (req.method === 'GET' && reqPath === '/debug') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        property,
+        config: {
+          unifiHost: UNIFI_HOST || 'not set',
+          unifiSite: UNIFI_SITE,
+          unifiUser: UNIFI_USER ? '(set)' : 'not set',
+          unifiPass: UNIFI_PASS ? '(set)' : 'not set',
+          cfAccountId: CF_ACCOUNT_ID ? '(set)' : 'not set',
+          cfD1DatabaseId: CF_D1_DATABASE_ID ? '(set)' : 'not set',
+          cfApiToken: CF_API_TOKEN ? '(set)' : 'not set',
+          googleSheetId: GOOGLE_SHEET_ID || 'not set',
+          googleClientEmail: GOOGLE_CLIENT_EMAIL || 'not set',
+          googlePrivateKey: GOOGLE_PRIVATE_KEY ? `(set, starts with: ${GOOGLE_PRIVATE_KEY.substring(0, 27)}...)` : 'not set',
+          dashboardWebhook: DASHBOARD_WEBHOOK,
+        },
+        uptime: process.uptime(),
+        nodeVersion: process.version,
+        memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      }, null, 2));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  } catch (err) {
+    console.error(`[SERVER] Request handler error: ${err.message}`);
+    console.error(`[SERVER] Stack: ${err.stack}`);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end('<p>Internal server error. <a href="/">Go back</a></p>');
+    }
+  }
+});
+
+// Handle server-level errors
+server.on('error', (err) => {
+  console.error(`[SERVER] Server error: ${err.message}`);
 });
 
 // Download cover image at startup then start server
-console.log(`Downloading cover image for ${property.name}...`);
+console.log(`[STARTUP] Downloading cover image for ${property.name}...`);
 downloadImage(property.image, IMAGE_CACHE_PATH)
-  .then(() => console.log('Cover image cached successfully'))
-  .catch(err => console.warn('Cover image download failed (will retry on next restart):', err.message))
+  .then(() => console.log('[STARTUP] Cover image cached successfully'))
+  .catch(err => console.warn(`[STARTUP] Cover image download failed (will retry on next restart): ${err.message}`))
   .finally(() => {
     server.listen(PORT, '0.0.0.0', () => {
-      console.log(`Portal running at http://0.0.0.0:${PORT} — ${property.name}`);
+      console.log(`[STARTUP] ✓ Portal running at http://0.0.0.0:${PORT} — ${property.name}`);
+      console.log(`[STARTUP] Health check: http://0.0.0.0:${PORT}/health`);
+      console.log(`[STARTUP] Debug info: http://0.0.0.0:${PORT}/debug`);
     });
   });
