@@ -1,5 +1,5 @@
 name: CohoSTR WiFi Portal
-version: "1.5.0"
+version: "1.6.0"
 slug: cohostr_wifi_portal
 description: "Branded guest WiFi captive portal for CohoSTR properties."
 url: https://github.com/trinityvoxel/cohostr-wifi-portal
@@ -16,6 +16,7 @@ options:
   property_image_url: "https://hostaway-platform.s3.us-west-2.amazonaws.com/listing/87999-297530-DcPs67WuOwB5o7P5GqtCvFN32E8cRhwrrp8RMIlPoa8-68efd79c87e31"
   port: 80
   unifi_host: "192.168.1.1"
+  unifi_api_key: ""
   unifi_user: "admin"
   unifi_pass: ""
   unifi_site: "default"
@@ -35,6 +36,7 @@ schema:
   property_image_url: "str"
   port: "int"
   unifi_host: "str"
+  unifi_api_key: "str"
   unifi_user: "str"
   unifi_pass: "str"
   unifi_site: "str"

@@ -32,6 +32,7 @@ const UNIFI_HOST = process.env.UNIFI_HOST;
 const UNIFI_USER = process.env.UNIFI_USER;
 const UNIFI_PASS = process.env.UNIFI_PASS;
 const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
+const UNIFI_API_KEY = process.env.UNIFI_API_KEY || '';
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_D1_DATABASE_ID = process.env.CF_D1_DATABASE_ID;
 const CF_API_TOKEN = process.env.CF_API_TOKEN;
@@ -78,6 +79,7 @@ const DASHBOARD_WEBHOOK = process.env.DASHBOARD_WEBHOOK || 'https://app.cohostr.
 console.log(`[STARTUP] CohoSTR WiFi Portal starting — ${property.name} on port ${PORT}`);
 console.log(`[STARTUP] UniFi host: ${UNIFI_HOST || '(not configured)'}`);
 console.log(`[STARTUP] UniFi site: ${UNIFI_SITE}`);
+console.log(`[STARTUP] UniFi API key: ${UNIFI_API_KEY ? 'configured (v1 Hotspot API)' : 'not configured (will use legacy login)'}`);
 console.log(`[STARTUP] Cloudflare D1: ${CF_D1_DATABASE_ID ? 'configured' : 'not configured'}`);
 console.log(`[STARTUP] Google Sheets: ${GOOGLE_SHEET_ID ? 'configured' : 'not configured'}`);
 console.log(`[STARTUP] Google Private Key: ${GOOGLE_PRIVATE_KEY ? `present (${GOOGLE_PRIVATE_KEY.substring(0, 30)}...)` : 'not configured'}`);
@@ -277,14 +279,18 @@ async function syncToGoogleSheets(name, email, propertyName, timestamp, emailCon
 
 // ─── Unifi Guest Authorization ────────────────────────────────────────────────
 
-async function unifiRequest(reqPath, method, body, cookies, csrfToken) {
+// Parse the UniFi host into hostname and port
+function getUnifiHostInfo() {
+  const hostParts = (UNIFI_HOST || '').split(':');
+  const hostname = hostParts[0];
+  const port = hostParts[1] ? parseInt(hostParts[1]) : 443;
+  return { hostname, port };
+}
+
+async function unifiRequest(reqPath, method, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const postData = body ? JSON.stringify(body) : '';
-
-    // Determine port — support both standard 443 and UniFi's alternate 8443
-    const hostParts = UNIFI_HOST.split(':');
-    const hostname = hostParts[0];
-    const port = hostParts[1] ? parseInt(hostParts[1]) : 443;
+    const { hostname, port } = getUnifiHostInfo();
 
     const options = {
       hostname,
@@ -294,9 +300,8 @@ async function unifiRequest(reqPath, method, body, cookies, csrfToken) {
       rejectUnauthorized: false, // Self-signed cert on local controller
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-        ...(cookies ? { Cookie: cookies } : {}),
-        ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {}),
+        ...extraHeaders,
       },
     };
 
@@ -306,15 +311,12 @@ async function unifiRequest(reqPath, method, body, cookies, csrfToken) {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
-        // *** FIX: Use safe JSON parsing instead of bare JSON.parse ***
-        // This was the line 178 crash — UniFi controller can return XML/HTML
-        // on redirects, errors, or when the API path is wrong
         const parsedBody = safeJsonParse(data, `UniFi ${reqPath}`);
 
         if (parsedBody._parseError) {
           console.error(`[UNIFI] Non-JSON response from ${reqPath} (HTTP ${res.statusCode})`);
           console.error(`[UNIFI] This may indicate:`);
-          console.error(`[UNIFI]   - Wrong UniFi host/port (try adding :8443 if using older controller)`);
+          console.error(`[UNIFI]   - Wrong UniFi host/port`);
           console.error(`[UNIFI]   - Controller is redirecting to a login page`);
           console.error(`[UNIFI]   - API path doesn't exist on this controller version`);
           console.error(`[UNIFI]   - Network firewall blocking the connection`);
@@ -345,76 +347,256 @@ async function unifiRequest(reqPath, method, body, cookies, csrfToken) {
   });
 }
 
+// ─── Strategy 1: Official v1 External Hotspot API (Cloud Gateway Ultra / UDM) ─
+// Uses API key from Network > Control Plane > Integrations
+// This is the recommended approach for Cloud Gateway Ultra
+async function authorizeGuestV1Api(mac, minutes = 480) {
+  console.log(`[UNIFI-V1] Using official v1 Hotspot API with API key`);
+
+  const apiKeyHeader = { 'X-API-KEY': UNIFI_API_KEY };
+
+  // Step 1: Get sites
+  console.log(`[UNIFI-V1] Step 1: Fetching sites...`);
+  const sitesRes = await unifiRequest(
+    '/proxy/network/integration/v1/sites',
+    'GET',
+    null,
+    apiKeyHeader
+  );
+
+  if (sitesRes.status !== 200 || sitesRes.body._parseError) {
+    console.error(`[UNIFI-V1] Failed to get sites — HTTP ${sitesRes.status}`);
+    return false;
+  }
+
+  // The response is an array of sites, or { data: [...] }
+  const sites = Array.isArray(sitesRes.body) ? sitesRes.body : (sitesRes.body.data || []);
+  if (sites.length === 0) {
+    console.error(`[UNIFI-V1] No sites found in API response`);
+    return false;
+  }
+
+  const siteId = sites[0].id || sites[0]._id || sites[0].siteId;
+  console.log(`[UNIFI-V1] Using site: ${siteId} (${sites[0].name || 'default'})`);
+
+  // Step 2: Find the client by MAC address to get the clientId
+  console.log(`[UNIFI-V1] Step 2: Looking up client MAC=${mac}...`);
+  const normalizedMac = mac.toLowerCase().replace(/-/g, ':');
+  const clientsRes = await unifiRequest(
+    `/proxy/network/integration/v1/sites/${siteId}/clients?macAddress=${encodeURIComponent(normalizedMac)}`,
+    'GET',
+    null,
+    apiKeyHeader
+  );
+
+  if (clientsRes.status !== 200 || clientsRes.body._parseError) {
+    console.error(`[UNIFI-V1] Failed to look up client — HTTP ${clientsRes.status}`);
+    console.error(`[UNIFI-V1] Response: ${JSON.stringify(clientsRes.body)}`);
+    return false;
+  }
+
+  const clients = Array.isArray(clientsRes.body) ? clientsRes.body : (clientsRes.body.data || []);
+
+  // Try to find the client matching this MAC
+  let client = clients.find(c =>
+    (c.macAddress || c.mac || '').toLowerCase().replace(/-/g, ':') === normalizedMac
+  );
+
+  // If filtered endpoint returned a single client object, use that
+  if (!client && !Array.isArray(clientsRes.body) && clientsRes.body.id) {
+    client = clientsRes.body;
+  }
+
+  if (!client) {
+    console.error(`[UNIFI-V1] Client with MAC=${mac} not found. ${clients.length} clients returned.`);
+    console.error(`[UNIFI-V1] The device may not have fully connected yet, or MAC format mismatch.`);
+    // Log first few clients for debugging
+    if (clients.length > 0) {
+      console.log(`[UNIFI-V1] Sample clients: ${JSON.stringify(clients.slice(0, 3))}`);
+    }
+    return false;
+  }
+
+  const clientId = client.id || client._id || client.clientId;
+  console.log(`[UNIFI-V1] Found client: id=${clientId}, name=${client.name || 'unknown'}, authorized=${client.access?.authorized || false}`);
+
+  // Step 3: Authorize the client
+  console.log(`[UNIFI-V1] Step 3: Authorizing client for ${minutes} minutes...`);
+  const authRes = await unifiRequest(
+    `/proxy/network/integration/v1/sites/${siteId}/clients/${clientId}/actions`,
+    'POST',
+    {
+      action: 'AUTHORIZE_GUEST_ACCESS',
+      timeLimitMinutes: minutes,
+    },
+    apiKeyHeader
+  );
+
+  console.log(`[UNIFI-V1] Auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
+
+  if (authRes.status >= 200 && authRes.status < 300) {
+    console.log(`[UNIFI-V1] ✓ Authorized guest via v1 API: ${mac} for ${minutes} min`);
+    return true;
+  }
+
+  console.error(`[UNIFI-V1] Authorization failed — HTTP ${authRes.status}`);
+  return false;
+}
+
+// ─── Strategy 2: Legacy session-based API (UniFi OS — Cloud Gateway, UDM) ────
+// Uses /api/auth/login + /proxy/network/api/s/{site}/cmd/stamgr
+async function authorizeGuestLegacyUnifiOS(mac, minutes = 480) {
+  console.log(`[UNIFI-LEGACY] Trying UniFi OS login (/api/auth/login)...`);
+
+  const loginRes = await unifiRequest('/api/auth/login', 'POST', {
+    username: UNIFI_USER,
+    password: UNIFI_PASS,
+  });
+
+  if (loginRes.body._parseError || loginRes.status === 404) {
+    console.warn(`[UNIFI-LEGACY] /api/auth/login returned ${loginRes.status} — not a UniFi OS endpoint`);
+    return null; // Signal to try next strategy
+  }
+
+  if (loginRes.status !== 200) {
+    console.error(`[UNIFI-LEGACY] Login failed — HTTP ${loginRes.status}: ${JSON.stringify(loginRes.body)}`);
+    console.error(`[UNIFI-LEGACY] If using a UI.com cloud account, create a local-only admin user instead.`);
+    console.error(`[UNIFI-LEGACY] Cloud accounts with MFA cannot be used for API access.`);
+    return false;
+  }
+
+  const setCookies = loginRes.headers['set-cookie'] || [];
+  const cookies = setCookies.map(c => c.split(';')[0]).join('; ');
+  const csrfToken = loginRes.headers['x-csrf-token'] || '';
+  console.log(`[UNIFI-LEGACY] Login OK, ${setCookies.length} cookies, CSRF: ${csrfToken ? 'yes' : 'no'}`);
+
+  // Authorize guest via proxy path
+  const authRes = await unifiRequest(
+    `/proxy/network/api/s/${UNIFI_SITE}/cmd/stamgr`,
+    'POST',
+    { cmd: 'authorize-guest', mac, minutes },
+    {
+      ...(cookies ? { Cookie: cookies } : {}),
+      ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+    }
+  );
+
+  console.log(`[UNIFI-LEGACY] Auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
+
+  if (authRes.body._parseError) {
+    console.error(`[UNIFI-LEGACY] Non-JSON auth response — proxy path may not exist`);
+    return false;
+  }
+
+  if (authRes.status !== 200) {
+    console.error(`[UNIFI-LEGACY] Guest auth failed — HTTP ${authRes.status}`);
+    return false;
+  }
+
+  console.log(`[UNIFI-LEGACY] ✓ Authorized guest: ${mac} for ${minutes} min`);
+  return true;
+}
+
+// ─── Strategy 3: Classic controller API (older UniFi software controllers) ────
+// Uses /api/login + /api/s/{site}/cmd/stamgr (no /proxy/network prefix)
+async function authorizeGuestClassicController(mac, minutes = 480) {
+  console.log(`[UNIFI-CLASSIC] Trying classic controller login (/api/login)...`);
+
+  const loginRes = await unifiRequest('/api/login', 'POST', {
+    username: UNIFI_USER,
+    password: UNIFI_PASS,
+  });
+
+  if (loginRes.body._parseError || loginRes.status === 404) {
+    console.warn(`[UNIFI-CLASSIC] /api/login returned ${loginRes.status} — not a classic controller`);
+    return null;
+  }
+
+  if (loginRes.status !== 200) {
+    console.error(`[UNIFI-CLASSIC] Login failed — HTTP ${loginRes.status}`);
+    return false;
+  }
+
+  const setCookies = loginRes.headers['set-cookie'] || [];
+  const cookies = setCookies.map(c => c.split(';')[0]).join('; ');
+  console.log(`[UNIFI-CLASSIC] Login OK, ${setCookies.length} cookies`);
+
+  const authRes = await unifiRequest(
+    `/api/s/${UNIFI_SITE}/cmd/stamgr`,
+    'POST',
+    { cmd: 'authorize-guest', mac, minutes },
+    cookies ? { Cookie: cookies } : {}
+  );
+
+  console.log(`[UNIFI-CLASSIC] Auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
+
+  if (authRes.status !== 200 || authRes.body._parseError) {
+    console.error(`[UNIFI-CLASSIC] Guest auth failed — HTTP ${authRes.status}`);
+    return false;
+  }
+
+  console.log(`[UNIFI-CLASSIC] ✓ Authorized guest: ${mac} for ${minutes} min`);
+  return true;
+}
+
+// ─── Main Authorization Entrypoint (auto-detects correct strategy) ────────────
 async function authorizeGuest(mac, minutes = 480) {
-  if (!UNIFI_HOST || !UNIFI_USER || !UNIFI_PASS) {
-    console.error('[UNIFI] UniFi credentials not fully configured — cannot authorize guest');
+  if (!UNIFI_HOST) {
+    console.error('[UNIFI] UniFi host not configured — cannot authorize guest');
+    return false;
+  }
+
+  // Need either API key or username+password
+  if (!UNIFI_API_KEY && (!UNIFI_USER || !UNIFI_PASS)) {
+    console.error('[UNIFI] No UniFi API key or credentials configured — cannot authorize guest');
+    console.error('[UNIFI] Configure unifi_api_key (recommended for Cloud Gateway Ultra)');
+    console.error('[UNIFI] Or configure unifi_user + unifi_pass for legacy login');
     return false;
   }
 
   try {
     console.log(`[UNIFI] Attempting to authorize guest MAC=${mac} for ${minutes} minutes`);
-    console.log(`[UNIFI] Connecting to UniFi controller at ${UNIFI_HOST}`);
+    console.log(`[UNIFI] Controller: ${UNIFI_HOST}`);
 
-    // UniFi OS login (Cloud Gateway Ultra, UDM, UDM Pro)
-    const loginRes = await unifiRequest('/api/auth/login', 'POST', {
-      username: UNIFI_USER,
-      password: UNIFI_PASS,
-    });
-
-    // Check for parse errors on login response
-    if (loginRes.body._parseError) {
-      console.error(`[UNIFI] Login returned non-JSON response — controller may be unreachable or wrong address`);
-      console.error(`[UNIFI] Verify UNIFI_HOST (${UNIFI_HOST}) is correct and accessible from this network`);
-      return false;
+    // Strategy 1: If API key is configured, use the official v1 Hotspot API
+    // This is the recommended method for Cloud Gateway Ultra
+    if (UNIFI_API_KEY) {
+      console.log(`[UNIFI] API key configured — using v1 External Hotspot API (recommended)`);
+      const result = await authorizeGuestV1Api(mac, minutes);
+      if (result) return true;
+      console.warn(`[UNIFI] v1 API failed — will try legacy methods if credentials are available`);
     }
 
-    if (loginRes.status !== 200) {
-      console.error(`[UNIFI] Login failed — HTTP ${loginRes.status}: ${JSON.stringify(loginRes.body)}`);
-      return false;
+    // Strategy 2: Try UniFi OS login (/api/auth/login) — Cloud Gateways & UDM
+    if (UNIFI_USER && UNIFI_PASS) {
+      console.log(`[UNIFI] Trying UniFi OS session-based login...`);
+      const legacyResult = await authorizeGuestLegacyUnifiOS(mac, minutes);
+      if (legacyResult === true) return true;
+      if (legacyResult === false) {
+        // Login worked but auth failed — don't try classic
+        console.error(`[UNIFI] UniFi OS login succeeded but guest authorization failed`);
+        return false;
+      }
+
+      // legacyResult === null means /api/auth/login returned 404 → try classic
+      console.log(`[UNIFI] UniFi OS endpoint not found — trying classic controller...`);
+      const classicResult = await authorizeGuestClassicController(mac, minutes);
+      if (classicResult === true) return true;
+      if (classicResult === false) return false;
     }
 
-    const setCookies = loginRes.headers['set-cookie'] || [];
-    const cookies = setCookies.map(c => c.split(';')[0]).join('; ');
-    const csrfToken = loginRes.headers['x-csrf-token'] || '';
-    console.log(`[UNIFI] Login successful, got ${setCookies.length} cookies, CSRF token: ${csrfToken ? 'present' : 'absent'}`);
-
-    // Authorize the guest via UniFi OS proxy path
-    const authRes = await unifiRequest(
-      `/proxy/network/api/s/${UNIFI_SITE}/cmd/stamgr`,
-      'POST',
-      { cmd: 'authorize-guest', mac, minutes },
-      cookies,
-      csrfToken
-    );
-
-    console.log(`[UNIFI] Auth response: HTTP ${authRes.status} — ${JSON.stringify(authRes.body)}`);
-
-    // Check for parse errors on auth response
-    if (authRes.body._parseError) {
-      console.error(`[UNIFI] Authorization returned non-JSON response`);
-      console.error(`[UNIFI] The /proxy/network/ path may not exist on this controller`);
-      console.error(`[UNIFI] For older controllers, try /api/s/${UNIFI_SITE}/cmd/stamgr instead`);
-      return false;
-    }
-
-    if (authRes.status !== 200) {
-      console.error(`[UNIFI] Guest authorization failed — HTTP ${authRes.status}`);
-      return false;
-    }
-
-    if (authRes.body?.meta?.rc !== 'ok') {
-      console.error(`[UNIFI] UniFi rejected authorization: ${JSON.stringify(authRes.body?.meta)}`);
-      // Some UniFi versions return different success indicators
-      // Don't consider this fatal if HTTP 200 was returned
-      console.warn(`[UNIFI] Note: Some UniFi versions don't return meta.rc=ok but still authorize successfully`);
-    }
-
-    console.log(`[UNIFI] ✓ Authorized guest: ${mac} for ${minutes} min`);
-    return true;
+    // All strategies exhausted
+    console.error(`[UNIFI] ✗ All authorization strategies failed for MAC=${mac}`);
+    console.error(`[UNIFI] Troubleshooting for Cloud Gateway Ultra:`);
+    console.error(`[UNIFI]   1. RECOMMENDED: Generate an API key in UniFi Network → Settings → Control Plane → Integrations`);
+    console.error(`[UNIFI]      Then set unifi_api_key in the add-on config`);
+    console.error(`[UNIFI]   2. Ensure the controller is reachable at https://${UNIFI_HOST}`);
+    console.error(`[UNIFI]   3. For legacy login: create a LOCAL admin user (not a UI.com cloud account)`);
+    console.error(`[UNIFI]   4. Check that the Hotspot/Captive Portal is enabled on the guest SSID`);
+    return false;
   } catch (err) {
     console.error(`[UNIFI] Authorization failed with error: ${err.message}`);
     console.error(`[UNIFI] Stack: ${err.stack}`);
-    // Don't re-throw — WiFi auth failure should not crash the server
     return false;
   }
 }
@@ -825,6 +1007,7 @@ const server = http.createServer(async (req, res) => {
         config: {
           unifiHost: UNIFI_HOST || 'not set',
           unifiSite: UNIFI_SITE,
+          unifiApiKey: UNIFI_API_KEY ? '(set — v1 Hotspot API)' : 'not set',
           unifiUser: UNIFI_USER ? '(set)' : 'not set',
           unifiPass: UNIFI_PASS ? '(set)' : 'not set',
           cfAccountId: CF_ACCOUNT_ID ? '(set)' : 'not set',
