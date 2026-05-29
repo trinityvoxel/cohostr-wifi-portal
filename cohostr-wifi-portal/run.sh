@@ -7,6 +7,7 @@ export PROPERTY_LISTING_URL=$(bashio::config 'property_listing_url')
 export PROPERTY_IMAGE_URL=$(bashio::config 'property_image_url')
 export PORT=$(bashio::config 'port')
 export UNIFI_HOST=$(bashio::config 'unifi_host')
+export UNIFI_API_KEY=$(bashio::config 'unifi_api_key')
 export UNIFI_USER=$(bashio::config 'unifi_user')
 export UNIFI_PASS=$(bashio::config 'unifi_pass')
 export UNIFI_SITE=$(bashio::config 'unifi_site')
@@ -17,6 +18,7 @@ export GOOGLE_SHEET_ID=$(bashio::config 'google_sheet_id')
 export GOOGLE_CLIENT_EMAIL=$(bashio::config 'google_client_email')
 export GOOGLE_PRIVATE_KEY=$(bashio::config 'google_private_key')
 export DASHBOARD_WEBHOOK=$(bashio::config 'dashboard_webhook')
+export DASHBOARD_WEBHOOK_SECRET=$(bashio::config 'dashboard_webhook_secret')
 
 bashio::log.info "Starting CohoSTR WiFi Portal for property: ${PROPERTY_NAME} (${PROPERTY_ID}) on port ${PORT}"
 
